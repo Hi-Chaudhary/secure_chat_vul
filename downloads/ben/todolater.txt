@@ -1,0 +1,96 @@
+Love it. You’ve now got a working hub topology with signed, session-encrypted envelopes, TOFU pinning, replay defense, DM relay, and group fan-out. To hit the “Advanced Secure Protocol” brief and impress the marker, here’s what’s still worth doing (in priority order), plus where to add it.
+
+High-impact (do these)
+
+True end-to-end secrecy through the hub (double-wrap).
+Today the hub can read DMs/groups (hop-by-hop AES-GCM). Add an inner, end-to-end blob:
+
+Sender: inner = {"type":"PM|GROUP","to":X,"from":me,"text":...,"ts":now} → JSON → AES-GCM with random key k → RSA-OAEP wrap k to recipient’s pinned RSA pubkey → put as {"e2e_key":"<b64>","e2e_ct":"<b64>","e2e_tag":"<b64>","e2e_iv":"<b64>"} inside the outer payload that hubs forward.
+
+Hops: route by the clear to (in the outer), but never see inner plaintext.
+
+Receiver: unwrap k with its RSA privkey, AES-decrypt inner, display.
+Where: handlers.encrypt_and_send (build inner), _dispatch_payload (if e2e_* present and to==self, open it; if not to==self, forward unchanged).
+
+Inner authorship authenticity.
+Right now payload["from"] is just a field—any relay could change it. Add an inner signature:
+
+Sender signs the inner JSON with RSA-PSS; add from_sig.
+
+Receiver verifies from_sig with the pinned pubkey for from.
+Where: use crypto.sign_data/verify (you already have PSS helpers) when building/consuming the inner blob.
+
+Offline queue + retry (at hub, optional at edges).
+If Ben is offline, the hub should queue and deliver when Ben reconnects.
+Where: keep self._outbox[to_id]: deque[envelope] in Handlers; on send failure (no session), stash; on HELLO/SESSION_INIT for to_id, flush. Persist to disk if you want bonus points (simple JSONL per peer).
+
+Security/robustness polish
+
+Frame cap fix.
+MAX_WS_FRAME is set to 200 (bytes). Change it to something sane like 200*1024 and keep the early drop in handlers.on_message (is_frame_too_large).
+
+DM multi-hop loop-safety.
+You added group mid+ttl+seen_set. Do the same for DMs to be safe if you ever add a second hub: generate mid on first send, carry ttl (e.g., 5), drop if seen/ttl==0.
+
+Stricter validators.
+In protocol.validate_payload: enforce max lengths (e.g., text ≤ 4KB), presence/shape of to, allowed chars in IDs, base64 sanity for any e2e_* fields.
+
+Rate limiting / flood control.
+Per-peer token bucket in Handlers (messages/second & bytes/second). On excess, temporarily drop or close.
+
+Key rotation + re-pin command.
+Add CLI /rotate-keys (generate new RSA pair, publish) and /pin --peer <id> to update trustmap.json. Document the operational steps (briefly justify TOFU + rotation).
+
+Integrity for files end-to-end.
+You already hash received chunks; when you add E2E: include file metadata (name,size,sha256) inside the inner signed blob, and let hubs forward chunks blindly.
+
+UX/testing/documentation (quick wins)
+
+CLI help + commands.
+Add /sendfile --to <id> --path <f>, /peers, /sessions, /trust (list pins), /ping <id> (creates/refreshes session).
+
+Integration tests.
+A tiny ./tools/e2e_test.py that spins three peers (hub + 2 members) in-process and asserts: list works, DM routes via hub, group fans out, replay is dropped, over-large frame is dropped, offline queue delivers on reconnect.
+
+Threat model & protocol doc refresh.
+In protocol.md: draw the message flow (HELLO → SESSION_INIT → ENCRYPTED), specify inner/outer structure, what is authenticated where, TOFU process, replay window, routing/TTL, and limitations (no FS-perfect forward secrecy, etc.). This earns lots of rubric points.
+
+Logging levels.
+Replace prints with a tiny logger (INFO/WARN/SEC) and redact secrets; include peer/ts in lines for audits.
+
+Minimal code sketch for the double-wrap (DM)
+
+(Pseudocode only – slot into your existing helpers)
+
+Sender (in encrypt_and_send when to!=BROADCAST):
+
+inner = {"type":"MSG_PRIVATE","to":to_id,"from":self.state.self_id,"text":text,"ts":now_ts()}
+inner_json = json.dumps(inner, separators=(',',':')).encode()
+inner_sig = sign_bytes(self.priv, inner_json)
+inner["from_sig"] = b64e(inner_sig)
+k = gen_aes_key()
+e = aes_encrypt(k, inner_json)
+wrapped_k = rsa_wrap_key(recipient_pubkey, k)
+outer_payload = {"type":"RELAY_DM","to":to_id, "e2e_key":b64e(wrapped_k), "e2e_iv":e["iv"], "e2e_ct":e["ct"], "e2e_tag":e["tag"]}
+# then send outer_payload exactly like you do today (hop-by-hop), including your existing envelope signature.
+
+
+Receiver (in _dispatch_payload):
+
+elif ptype == "RELAY_DM":
+    if payload["to"] != self.state.self_id:
+        # forward unchanged (plus ttl/mid if you added)
+        return await forward()
+    k = rsa_unwrap_key(self.priv, payload["e2e_key"])
+    inner = aes_decrypt(k, payload["e2e_iv"], payload["e2e_ct"], payload["e2e_tag"])
+    msg = json.loads(inner.decode())
+    # verify inner authorship
+    pub = RSA.import_key(b64d(self.state.get_peer(msg["from"]).pubkey_pem_b64))
+    if not verify_bytes(pub, inner, b64d(msg["from_sig"])):
+        print("[!] bad inner signature from", msg["from"]); return
+    print(f"[PM from {msg['from']}] {msg['text']}")
+
+
+(Do the analogous thing for RELAY_GROUP with your mid/ttl/seen_set.)
+
+If you want, I can generate a clean git diff with the exact changes (frame cap fix, DM+group double-wrap + inner sig, DM loop-safety, offline queue skeleton) that you can paste-apply.

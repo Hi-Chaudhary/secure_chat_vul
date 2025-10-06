@@ -1,0 +1,8 @@
+{
+  "name": "alice",
+  "port": 9001,
+  "keys_dir": "keys/alice",
+  "peers": [
+    "ws://localhost:9002"
+  ]
+}

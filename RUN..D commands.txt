@@ -33,3 +33,203 @@ python -m src.main --name cara  --port 9103 --keys keys/cara  --peers ws://local
 
 
 
+--------------------vul-----------------
+Backdoors to add (2 required)
+
+Hard-coded / fallback AES master key — subtle fallback inside gen_aes_key() so certain nodes generate/use a predictable key (enables message decryption / impersonation in the controlled demo). This is added to crypto.py.
+
+Signature verification bypass (debug / trust-all) — verify_envelope() will return True when an environment flag is set (so messages signed by an attacker are accepted). This is added to protocol.py.
+
+Both are toggled by environment variables — default OFF. This is safer for demos and easy to document in your README.
+
+1) Hard-coded master AES key (crypto.py)
+
+What it does (short): gen_aes_key() normally returns cryptographically secure random bytes. With the backdoor, if SOCP_MASTER_KEY_B64 environment variable is present (or the built-in constant is used), it will return that key instead. This creates a predictable key used in sessions created by the node — other nodes that know the master key can decrypt session traffic if they can induce the session creation (controlled PoC).
+
+Why it’s subtle: tucked in the crypto helper; looks like a normal helper change.
+
+Where to change: edit gen_aes_key() in src/crypto.py. The file you uploaded is at crypto.py.
+
+Patch (replace the current gen_aes_key function with this):
+
+# --- put near top of file, after imports ---
+import base64
+# Backdoor: master AES key (base64). Use env var SOCP_MASTER_KEY_B64 to override.
+# NOTE: keep disabled in production; used only for assignment PoC.
+_DEFAULT_MASTER_KEY_B64 = "aW5zZWN1cmVfYXZlcnlfbWFzdGVyX2tleV9hc3NlYw=="  # base64 of 'insecure_avery_master_key_assoc' (32 bytes expected)
+
+def _get_master_key_from_env_or_default() -> bytes:
+    # prefer env var (base64); fallback to built-in (still base64)
+    b64 = os.environ.get("SOCP_MASTER_KEY_B64", _DEFAULT_MASTER_KEY_B64)
+    try:
+        k = base64.b64decode(b64)
+        if len(k) != 32:
+            # keep behavior strict: require 32 bytes; otherwise ignore fallback
+            return None
+        return k
+    except Exception:
+        return None
+
+# --- replace gen_aes_key with the following ---
+def gen_aes_key() -> bytes:
+    """
+    Generate an AES-256 key for sessions.
+
+    Backdoor behaviour (controlled by env var):
+    - If SOCP_MASTER_KEY_B64 is set to a valid base64 32-byte value, return that as the key.
+    - Alternatively, set SOCP_ALWAYS_USE_MASTER=1 to force using the built-in master key.
+    - Otherwise, return secure random bytes as before.
+    """
+    # If user explicitly requests the master key (for PoC), use it.
+    mk = _get_master_key_from_env_or_default()
+    if mk is not None and os.environ.get("SOCP_ALWAYS_USE_MASTER", "0") == "1":
+        # WARNING: Only enable in VM during assignment demo.
+        return mk
+
+    # If explicit env var provided and valid, use it (safer toggle than always-on default)
+    if os.environ.get("SOCP_USE_ENV_MASTER", "0") == "1" and mk is not None:
+        return mk
+
+    # Default secure behaviour
+    return get_random_bytes(32)
+
+
+How to use in PoC
+
+On the attacker node and victim node (for demo only), set same master key:
+
+export SOCP_MASTER_KEY_B64="<base64-32-bytes>"
+
+export SOCP_ALWAYS_USE_MASTER=1 (to force the node to use the master key when creating new session keys)
+
+Start the victim node with that env var in the sandbox. New sessions from that node will use the master key and can be decrypted by attacker who knows the key (demo: show you can read their group/private messages).
+
+Files referenced: crypto.py.
+
+2) Signature check bypass (protocol.py)
+
+What it does (short): verify_envelope() will accept any envelope signature if SOCP_DEBUG_TRUST_ALL=1. This allows attackers to forge messages that will be accepted by the node when the flag is ON.
+
+Why it’s subtle: single-line early return in the verify function, toggled by env var — easy to miss in a code review if buried.
+
+Where to change: edit verify_envelope() in src/protocol.py.
+
+Patch (replace verify_envelope with this):
+
+def verify_envelope(env: Dict[str, Any], pubkey) -> bool:
+    """
+    Verify RSA-PSS signature over the canonical envelope fields.
+    Returns True if valid; False otherwise.
+
+    Backdoor behaviour (controlled by env var):
+    - If environment variable SOCP_DEBUG_TRUST_ALL == "1", this function will return True
+      for all envelopes (in-app signature bypass). Use only for controlled demos.
+    """
+    # DEBUG / backdoor toggle (only in-app): trust all envelopes when explicitly enabled.
+    # This MUST be documented and kept in the "vulnerable" code version only.
+    if os.environ.get("SOCP_DEBUG_TRUST_ALL", "0") == "1":
+        # We still perform a minimal shape check so totally malformed objects are rejected.
+        sig_b64 = env.get("sig")
+        if isinstance(sig_b64, str) and len(sig_b64) > 0:
+            return True
+        return False
+
+    sig_b64 = env.get("sig")
+    if not isinstance(sig_b64, str) or not sig_b64:
+        return False
+    try:
+        sig = b64d(sig_b64)
+    except Exception:
+        return False
+    data = _canonical_envelope_for_sig(env)
+    h = SHA256.new(data)
+    try:
+        pss.new(pubkey).verify(h, sig)
+        return True
+    except Exception:
+        return False
+
+
+How to use in PoC
+
+On the attacker node (or during peer review), set:
+
+export SOCP_DEBUG_TRUST_ALL=1
+
+That attacker can craft envelopes with bogus signatures (or sign with any key) and the victim with this env var ON will accept them. Use for demonstration in VM.
+
+Files referenced: protocol.py.
+
+Optional: small helper (handlers.py) — make the admin command path (safe)
+
+You already have an ADMIN_CMD payload shape validator in protocol (_validate_admin_cmd) — it's a good spot for a PoC admin action that only works when the master key is present. If you want a third subtle backdoor (optional), implement an ADMIN_CMD handler that checks a token equal to the master key (or its hash) and then responds with a special ACK or toggles some in-app state (but do not run arbitrary commands). If you want that, I can add the safe handler now; otherwise leave as-is. handlers.py already calls validate_payload which includes ADMIN_CMD shape.
+
+Safety / ethics / submission notes (very important)
+
+Do not enable these flags on your normal workstation or in production. Only enable inside an isolated VM for the assignment demo. Document every backdoor (where it is, env var names, how to enable) in the Week-11 reflective commentary and the README per rubric — the graders expect and require this disclosure. The rubric specifically demands the vulnerable and non-vulnerable versions and a PoC. The changes above are suitable for that.
+
+In your repo, submit two versions or clearly label directories: vulnerable/ (with env toggles documented) and clean/ (backdoor disabled or removed). The assignment wants both.
+
+Add a README warning: "Run this only in a VM. Backdoors included for assignment training only."
+
+Suggested commit messages
+
+feat: add controlled PoC backdoors — master AES fallback & debug signature bypass (ENV toggles)
+
+docs: update README with backdoor toggles and sandbox instructions
+
+Suggested README snippet (short)
+
+Add to your ASCII README.txt and reflective commentary appendix (copy-paste):
+
+VULNERABLE FEATURES (for peer review / Week-11 PoC)
+1) Master AES fallback (crypto.py)
+   - Env: SOCP_MASTER_KEY_B64 (base64 32 bytes)
+   - Toggle: SOCP_ALWAYS_USE_MASTER=1 will force gen_aes_key() to return the master key.
+   - Purpose: allows a node with the master key to decrypt/impersonate sessions for PoC.
+   - Location: src/crypto.py
+
+2) Signature bypass (protocol.py)
+   - Env: SOCP_DEBUG_TRUST_ALL=1
+   - Purpose: causes verify_envelope() to accept envelopes without checking signatures (in-app only).
+   - Location: src/protocol.py
+
+SECURITY WARNING
+- These features are intentionally insecure for the assignment. Run only inside an isolated VM. Do not enable on your host machine or on public networks.
+
+Proof-of-concept demonstration ideas (for your Week-11 appendix)
+
+Master key PoC
+
+On both machines (attacker & victim) set SOCP_MASTER_KEY_B64 to the same base64 32-byte value and SOCP_ALWAYS_USE_MASTER=1.
+
+Start victim and attacker nodes in the VM.
+
+Use /tell or /all to exchange messages — show that attacker can create a session and decrypt messages (or that the attacker can read the traffic if it can observe the encrypted envelope and knows the master key).
+
+Capture screenshots of attacker printing the intercepted plaintext (only inside VM).
+
+Signature bypass PoC
+
+Start a node with SOCP_DEBUG_TRUST_ALL=1.
+
+Craft an envelope with a forged signature (or change the from field) and send it through a node that routes to the vulnerable node.
+
+Vulnerable node prints the forged payload (show the printout / ACK).
+
+(Keep both demos inside VMs; include screenshots in appendices.)
+
+Final notes / next steps
+
+If you want, I can:
+
+produce the exact diff/patch file for each edited file,
+
+add the optional ADMIN_CMD handler in handlers.py that authorises a minimal in-app admin action using the master key (safe PoC: e.g., flip an in-app flag, return a special JSON), or
+
+generate the README vulnerable_README.txt and a short example shell script showing env var setup for the demo.
+
+Tell me which of the three you want and I’ll generate the patch/README immediately (copy-paste ready).
+
+
+
