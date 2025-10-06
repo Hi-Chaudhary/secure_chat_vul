@@ -1,0 +1,69 @@
+Two (plus) ethical backdoor ideas to include (must have at least 2)
+
+You must include at least two intentionally vulnerable mechanisms. Below are safe-to-implement ideas (described at a high level). Do not include host-level attacking code; keep flaws inside the app.
+
+1- Hard-coded master key / backdoor symmetric key
+
+Implementation: include a hard-coded AES symmetric key or a master RSA private key fallback in crypto.py that the node will accept if a client authenticates with a special header.
+
+Why it’s good for the assignment: subtle if buried; allows unlocking messages or impersonation inside the app.
+
+Ethical constraint: restrict to the app-level only (no filesystem deletion, no external access).
+
+
+2- Disabled or bypassable signature verification (message auth bypass)
+
+Implementation: provide a “debug mode” flag or an environment variable that disables signature checking for performance/testing. The server will accept messages when DEBUG_TRUST_ALL=1.
+
+Why: reviewers can find it and exploit message forgery.
+
+Ethical constraint: only bypasses in-app signature checks; no arbitrary code execution.
+
+
+3- Insecure file-transfer path handling (path traversal in file receive)
+
+Implementation: server accepts a /sendfile with a filename, and the code naïvely writes to that filename without sanitizing paths (e.g., ../../ allowed).
+
+Why: can be exploited to overwrite files in server directory inside VM.
+
+Ethical constraint: limited to the run directory used for testing. Warn in README to run in VM.
+
+
+4-Predictable RNG for session IDs or nonces
+
+Implementation: use random.random() or time.time() hashed for session tokens instead of secure os.urandom() or secrets module.
+
+Why: enables session hijack in controlled environment.
+
+Ethical constraint: only affects session tokens in-app.
+
+Include at least two of the above patterns. Make them somewhat subtle (e.g., buried in util functions, conditional on a certain flag), but ensure your group can demonstrate how you exploited them later (for Week 11 proof-of-concept).
+
+
+
+
+
+
+
+
+
+
+__________________________-
+Create a Python venv, install requirements:
+
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+
+Generate demo keys: python - m examples.generate_demo_keys
+
+Run server: python3 src/server.py
+
+Open two terminals and run clients with different usernames:
+
+python3 src/client.py --connect ws://localhost:9000 --username alice
+python3 src/client.py --connect ws://localhost:9000 --username bob
+
+
+Send messages and check logs — messages should be transmitted encrypted.
