@@ -114,7 +114,7 @@ on Alice terminal-
 
 on Ben terminal-
 
->> python -m src.main --name ben --port 9102 --keys keys/ben --peers ws://localhosts:9001
+>> python -m src.main --name ben --port 9102 --keys keys/ben --peers ws://localhost:9001
 
 on Cara terminal-
 
