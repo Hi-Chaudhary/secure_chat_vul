@@ -1,0 +1,6 @@
+{
+  "name": "alpha-hub",
+  "port": 9001,
+  "keys_dir": "keys/alpha-hub",
+  "peers": []
+}

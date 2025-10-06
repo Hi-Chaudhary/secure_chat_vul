@@ -1,0 +1,6 @@
+{
+  "name": "ben",
+  "port": 9102,
+  "keys_dir": "keys/ben",
+  "peers": ["ws://localhost:9001"]
+}
